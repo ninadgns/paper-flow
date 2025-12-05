@@ -5,6 +5,9 @@ import subprocess
 import time
 import os
 import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 TOPICS = [
     "unstructured data analysis",
@@ -18,6 +21,13 @@ MODEL = "gemma2:2b"
 DAYS_BACK = 7  # look back at last 7 days
 VERBOSE = True
 RELEVANT_PAPERS_FILE = "relevant_papers.txt"
+
+# Email configuration
+USER_EMAIL = os.getenv("USER_EMAIL", "")  # Set via environment variable or modify here
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")  # Gmail default, change for other providers
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))  # 587 for TLS, 465 for SSL
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")  # Usually same as USER_EMAIL
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")  # Use app password for Gmail
 
 def extract_paper_id(entry) -> str:
     """Extract arXiv paper ID from entry (e.g., '1234.5678' from 'http://arxiv.org/abs/1234.5678v1')."""
@@ -119,14 +129,25 @@ def llm_filter(title: str, abstract: str) -> bool:
     if VERBOSE:
         print(f"[DEBUG] Filtering paper: '{title[:60]}...'")
         print(f"[DEBUG] Abstract length: {len(abstract)} characters")
-    prompt = f"""Is this paper substantially related to any of these topics?
-- Unstructured data analysis
-- Querying unstructured data
-- Semi-structured data analysis
-- Text-to-table or text-to-relational schema
+    prompt = f"""You are filtering papers for relevance to COMPUTER SCIENCE topics about data management and processing.
+
+The paper must be DIRECTLY and SUBSTANTIALLY related to one or more of these specific topics:
+- Unstructured data analysis (methods for analyzing text, documents, or unstructured formats)
+- Querying unstructured data (searching, querying, or retrieving information from unstructured sources)
+- Semi-structured data analysis (working with JSON, XML, or other semi-structured formats)
+- Text-to-table conversion (extracting structured tables from unstructured text)
+- Text-to-relational schema (converting text into database schemas or relational models)
+
+EXCLUDE papers that are:
+- About physics, astronomy, biology, chemistry, or other natural sciences (even if they mention "data analysis")
+- About general machine learning or AI without focus on data management/processing
+- About databases or data systems without focus on unstructured/semi-structured data
+- Only tangentially related (e.g., using data analysis as a tool but not about data management itself)
 
 Title: {title}
 Abstract: {abstract}
+
+Is this paper DIRECTLY about computer science topics related to unstructured/semi-structured data management, querying, or conversion? 
 
 Respond with ONLY one word: YES or NO. Do not explain."""
     if VERBOSE:
@@ -182,6 +203,70 @@ def format_entry(entry):
     )
 
 
+def send_batch_email_notification(papers_list):
+    """Send a single email notification with all new relevant papers found."""
+    if not papers_list:
+        return False
+        
+    if not USER_EMAIL or not SMTP_USERNAME or not SMTP_PASSWORD:
+        if VERBOSE:
+            print(f"[WARN] Email configuration incomplete. Skipping email notification.")
+            print(f"[DEBUG] USER_EMAIL: {'set' if USER_EMAIL else 'not set'}")
+            print(f"[DEBUG] SMTP_USERNAME: {'set' if SMTP_USERNAME else 'not set'}")
+            print(f"[DEBUG] SMTP_PASSWORD: {'set' if SMTP_PASSWORD else 'not set'}")
+        return False
+    
+    try:
+        # Create email message
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USERNAME
+        msg['To'] = USER_EMAIL
+        
+        paper_count = len(papers_list)
+        if paper_count == 1:
+            msg['Subject'] = f"New Relevant arXiv Paper Found: {papers_list[0][0].title.strip()[:60]}"
+        else:
+            msg['Subject'] = f"New Relevant arXiv Papers Found: {paper_count} papers"
+        
+        # Create email body with all papers (only title, link, and date)
+        body = f"""Found {paper_count} new relevant paper{'s' if paper_count > 1 else ''} on arXiv!
+
+"""
+        for entry, paper_id in papers_list:
+            # Format date nicely
+            published_date = datetime.strptime(
+                entry.published, "%Y-%m-%dT%H:%M:%SZ"
+            ).strftime("%Y-%m-%d")
+            
+            body += f"Title: {entry.title.strip()}\n"
+            body += f"Date: {published_date}\n"
+            body += f"Link: {entry.link}\n"
+            body += f"{'-'*80}\n\n"
+        
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Send email
+        if VERBOSE:
+            print(f"[DEBUG] Sending email notification to {USER_EMAIL}...")
+        
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Enable TLS encryption
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(SMTP_USERNAME, USER_EMAIL, text)
+        server.quit()
+        
+        if VERBOSE:
+            print(f"[INFO] Email notification sent successfully to {USER_EMAIL}")
+        return True
+        
+    except Exception as e:
+        print(f"[WARN] Failed to send email notification: {e}")
+        if VERBOSE:
+            print(f"[DEBUG] Exception details: {type(e).__name__}: {str(e)}")
+        return False
+
+
 def main():
     if VERBOSE:
         print("[DEBUG] Starting arXiv agent...")
@@ -202,6 +287,7 @@ def main():
         print(f"[DEBUG] Current UTC time: {now}")
     
     relevant_papers = []
+    new_relevant_papers = []  
     total_entries_processed = 0
     total_entries_in_range = 0
     total_llm_calls = 0
@@ -250,16 +336,14 @@ def main():
                     print(f"[WARN] Could not extract paper ID for entry, skipping cache check")
                 paper_id = None
             
-            # Check if paper is already in cache
             is_relevant = False
             if paper_id and paper_id in cached_paper_ids:
-                # Paper already known to be relevant
                 is_relevant = True
                 total_cached_hits += 1
                 if VERBOSE:
                     print(f"[DEBUG] Paper ID '{paper_id}' found in cache, skipping LLM call")
             else:
-                # Paper not in cache, check with LLM
+                
                 if VERBOSE:
                     if paper_id:
                         print(f"[DEBUG] Paper ID '{paper_id}' not in cache, checking with LLM...")
@@ -269,12 +353,19 @@ def main():
                 total_llm_calls += 1
                 is_relevant = llm_filter(title, abstract)
                 
-                # If relevant, add to cache
-                if is_relevant and paper_id:
-                    cached_paper_ids.add(paper_id)
-                    save_paper_id(RELEVANT_PAPERS_FILE, paper_id)
-                    if VERBOSE:
-                        print(f"[INFO] Added paper ID '{paper_id}' to cache")
+                if is_relevant:
+                    is_new_paper = not paper_id or paper_id not in cached_paper_ids
+                    
+                    if paper_id:
+                        cached_paper_ids.add(paper_id)
+                        save_paper_id(RELEVANT_PAPERS_FILE, paper_id)
+                        if VERBOSE:
+                            print(f"[INFO] Added paper ID '{paper_id}' to cache")
+                    
+                    if is_new_paper:
+                        new_relevant_papers.append((entry, paper_id))
+                        if VERBOSE:
+                            print(f"[INFO] New relevant paper found, queued for email notification")
             
             if is_relevant:
                 topic_relevant_count += 1
@@ -292,6 +383,14 @@ def main():
             if VERBOSE:
                 print(f"[DEBUG] Waiting 3 seconds before next topic (rate limiting)...")
             time.sleep(3)  # Respecting the arXiv API
+
+    if new_relevant_papers:
+        if VERBOSE:
+            print(f"\n[INFO] Pipeline complete. Sending single email notification for {len(new_relevant_papers)} new relevant paper(s)...")
+        send_batch_email_notification(new_relevant_papers)
+    else:
+        if VERBOSE:
+            print(f"\n[INFO] Pipeline complete. No new relevant papers found, skipping email notification.")
 
     if VERBOSE:
         print(f"\n[DEBUG] Processing complete:")
