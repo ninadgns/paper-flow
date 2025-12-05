@@ -201,11 +201,6 @@ def main():
         print(f"[DEBUG] Date range: {week_ago.date()} to {now.date()}")
         print(f"[DEBUG] Current UTC time: {now}")
     
-    print(
-        f"\n=== arXiv Weekly Report ({week_ago.date()} → {now.date()}) "
-        f"Filtered by {MODEL} ===\n"
-    )
-
     relevant_papers = []
     total_entries_processed = 0
     total_entries_in_range = 0
@@ -306,25 +301,6 @@ def main():
         print(f"  - Total LLM calls made: {total_llm_calls}")
         print(f"  - Relevant papers found: {len(relevant_papers)}")
 
-    if not relevant_papers:
-        print("No relevant papers found for the last 7 days.")
-        if VERBOSE:
-            print("[DEBUG] No papers matched the relevance criteria")
-        return
-
-    if VERBOSE:
-        print(f"[DEBUG] Sorting {len(relevant_papers)} relevant papers by date...")
-    relevant_papers.sort(key=lambda x: x[0], reverse=True)
-
-    current_date = None
-    for date, entry_str in relevant_papers:
-        if date != current_date:
-            current_date = date
-            print(f"\n##### {date} #####\n")
-        print(entry_str)
-    
-    if VERBOSE:
-        print(f"\n[DEBUG] Report generation complete. Total relevant papers: {len(relevant_papers)}")
 
 
 if __name__ == "__main__":
